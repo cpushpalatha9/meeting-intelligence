@@ -1720,9 +1720,7 @@ GitHub Repository:
 
 # 32. Author
 
-## Pushpalatha
-
-Computer Science Engineering
+## C Pushpalatha
 
 Areas of interest:
 
