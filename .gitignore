@@ -7,3 +7,8 @@ database/*.db
 vector_store/chroma_db/
 data/
 .streamlit/
+
+# Python cache
+__pycache__/
+*.pyc
+
