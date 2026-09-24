@@ -1,516 +1,612 @@
+# services/llm_service.py
+
 import json
+import os
+import random
 import re
 import time
+from typing import Any, Dict, Optional
 
+from dotenv import load_dotenv
 from google import genai
 
-from prompts.meeting_prompt import MEETING_PROMPT
-
+from prompts.meeting_prompt import (
+    build_meeting_prompt,
+    build_rag_prompt,
+)
 from schemas.meeting_schema import (
     MeetingIntelligence,
-    ActionItem,
-    Participant
 )
 
-from services.meeting_service import (
-    clean_action_items,
-    clean_participants
-)
+
+load_dotenv(override=True)
+
+
+class GeminiError(Exception):
+    """Base Gemini service error."""
+
+
+class GeminiQuotaError(GeminiError):
+    """Gemini quota/rate-limit error."""
+
+
+class GeminiTemporaryError(GeminiError):
+    """Temporary Gemini service error."""
+
+
+class GeminiPermanentError(GeminiError):
+    """Permanent Gemini configuration/request error."""
 
 
 class LLMService:
 
-    def __init__(
-        self,
-        api_key,
-        model
-    ):
+    def __init__(self):
 
-        if not api_key:
+        self.api_key = os.getenv(
+            "GEMINI_API_KEY",
+            ""
+        ).strip()
 
-            raise ValueError(
-                "Gemini API key is missing."
+        self.model = os.getenv(
+            "GEMINI_MODEL",
+            "gemini-3.8-flash"
+        ).strip()
+
+        if not self.api_key:
+
+            raise GeminiPermanentError(
+                "GEMINI_API_KEY is missing. "
+                "Add your Gemini API key to the .env file."
             )
 
-        if not model:
+        try:
 
-            raise ValueError(
-                "Gemini model is missing."
+            self.client = genai.Client(
+                api_key=self.api_key
             )
 
-        self.client = genai.Client(
-            api_key=api_key
-        )
+        except Exception as exc:
 
-        self.model = model
+            raise GeminiPermanentError(
+                f"Unable to initialize Gemini client: {exc}"
+            ) from exc
 
-    # =====================================
-    # INPUT VALIDATION
-    # =====================================
+    # ========================================================
+    # ERROR CLASSIFICATION
+    # ========================================================
 
-    def validate_transcript(
-        self,
-        transcript
-    ):
+    @staticmethod
+    def _classify_error(exc: Exception) -> str:
 
-        if transcript is None:
+        message = str(exc).lower()
 
-            raise ValueError(
-                "Transcript cannot be empty."
-            )
+        # Daily/project quota
+        daily_patterns = [
+            "generate_content_free_tier_requests",
+            "perdayperprojectpermodel",
+            "per_day_per_project_per_model",
+            "daily quota",
+            "quota exceeded",
+            "exceeded your current quota",
+        ]
 
-        transcript = transcript.strip()
+        if any(
+            pattern in message
+            for pattern in daily_patterns
+        ):
 
-        if not transcript:
+            return "daily_quota"
 
-            raise ValueError(
-                "Transcript cannot be empty."
-            )
+        # Short-term rate limiting
+        if (
+            "429" in message
+            or "rate limit" in message
+            or "resource exhausted" in message
+        ):
 
-        if len(transcript) < 10:
+            return "quota"
 
-            raise ValueError(
-                "Transcript is too short."
-            )
+        # Temporary server conditions
+        temporary_patterns = [
+            "500",
+            "502",
+            "503",
+            "504",
+            "unavailable",
+            "timeout",
+            "deadline exceeded",
+            "temporarily",
+        ]
 
-        return transcript
+        if any(
+            pattern in message
+            for pattern in temporary_patterns
+        ):
 
-    # =====================================
-    # PROMPT
-    # =====================================
+            return "temporary"
 
-    def create_prompt(
-        self,
-        transcript
-    ):
+        # Authentication
+        authentication_patterns = [
+            "401",
+            "403",
+            "api key",
+            "authentication",
+            "permission denied",
+            "unauthorized",
+        ]
 
-        return MEETING_PROMPT.format(
-            transcript=transcript
-        )
+        if any(
+            pattern in message
+            for pattern in authentication_patterns
+        ):
 
-    # =====================================
-    # GEMINI
-    # =====================================
+            return "authentication"
 
-    def call_llm(
-        self,
-        prompt
-    ):
+        # Invalid model/request
+        permanent_patterns = [
+            "400",
+            "404",
+            "not found",
+            "invalid argument",
+            "invalid model",
+            "unsupported",
+        ]
 
-        print(
-            "\nCalling Gemini..."
-        )
+        if any(
+            pattern in message
+            for pattern in permanent_patterns
+        ):
 
-        response = (
-            self.client.models.generate_content(
-                model=self.model,
-                contents=prompt
-            )
-        )
+            return "permanent"
 
-        print(
-            "Gemini response received."
-        )
+        return "unknown"
 
-        if not response.text:
+    # ========================================================
+    # JSON CLEANING
+    # ========================================================
 
-            raise ValueError(
+    @staticmethod
+    def _extract_json(text: str) -> Dict[str, Any]:
+
+        if not text:
+
+            raise GeminiPermanentError(
                 "Gemini returned an empty response."
             )
 
-        return response.text
+        cleaned = text.strip()
 
-    # =====================================
-    # CLEAN JSON
-    # =====================================
-
-    def clean_json_response(
-        self,
-        response_text
-    ):
-
-        text = response_text.strip()
-
-        # Remove ```json
-        text = re.sub(
-            r"^```(?:json)?\s*",
+        # Remove Markdown code fences
+        cleaned = re.sub(
+            r"^```(?:json)?",
             "",
-            text,
-            flags=re.IGNORECASE
+            cleaned,
+            flags=re.IGNORECASE,
         )
 
-        # Remove ```
-        text = re.sub(
-            r"\s*```$",
+        cleaned = re.sub(
+            r"```$",
             "",
-            text
+            cleaned,
         )
 
-        text = text.strip()
+        cleaned = cleaned.strip()
 
-        # Extract JSON object if extra text exists
-        first_brace = text.find("{")
-        last_brace = text.rfind("}")
+        # Direct JSON
+        try:
 
-        if (
-            first_brace != -1
-            and last_brace != -1
-            and last_brace > first_brace
-        ):
-
-            text = text[
-                first_brace:last_brace + 1
-            ]
-
-        return text.strip()
-
-    # =====================================
-    # PROCESS ONE TRANSCRIPT
-    # =====================================
-
-    def process_once(
-        self,
-        transcript
-    ):
-
-        prompt = self.create_prompt(
-            transcript
-        )
-
-        response_text = self.call_llm(
-            prompt
-        )
-
-        cleaned = (
-            self.clean_json_response(
-                response_text
+            result = json.loads(
+                cleaned
             )
+
+            if isinstance(
+                result,
+                dict
+            ):
+
+                return result
+
+        except json.JSONDecodeError:
+
+            pass
+
+        # Search for JSON object
+        match = re.search(
+            r"\{.*\}",
+            cleaned,
+            flags=re.DOTALL,
         )
 
-        data = json.loads(
-            cleaned
+        if match:
+
+            try:
+
+                result = json.loads(
+                    match.group(0)
+                )
+
+                if isinstance(
+                    result,
+                    dict
+                ):
+
+                    return result
+
+            except json.JSONDecodeError:
+
+                pass
+
+        raise GeminiPermanentError(
+            "Gemini returned invalid JSON."
         )
 
-        result = (
-            MeetingIntelligence
-            .model_validate(data)
-        )
+    # ========================================================
+    # NORMALIZE RESULT
+    # ========================================================
 
-        return result
+    @staticmethod
+    def _normalize_result(
+        data: Dict[str, Any]
+    ) -> Dict[str, Any]:
 
-    # =====================================
-    # PROCESS NORMAL TRANSCRIPT
-    # =====================================
+        defaults = {
 
-    def process(
-        self,
-        transcript
-    ):
+            "summary": "",
 
-        transcript = (
-            self.validate_transcript(
-                transcript
+            "key_points": [],
+
+            "decisions": [],
+
+            "action_items": [],
+
+            "participants": [],
+
+            "deadlines": [],
+
+            "priorities": [],
+        }
+
+        for key, default in defaults.items():
+
+            if key not in data:
+
+                data[key] = default
+
+        # Pydantic validation
+        try:
+
+            validated = (
+                MeetingIntelligence(
+                    **data
+                )
             )
-        )
 
-        max_retries = 3
+            return validated.model_dump()
+
+        except Exception as exc:
+
+            raise GeminiPermanentError(
+                f"Gemini response validation failed: {exc}"
+            ) from exc
+
+    # ========================================================
+    # SINGLE GENERATION REQUEST
+    # ========================================================
+
+    def _generate(
+        self,
+        prompt: str,
+        max_retries: int = 4,
+    ) -> str:
 
         last_error = None
 
         for attempt in range(
-            max_retries
+            1,
+            max_retries + 1
         ):
 
             try:
 
-                print(
-                    f"\nAttempt "
-                    f"{attempt + 1}/"
-                    f"{max_retries}"
+                response = (
+                    self.client
+                    .models
+                    .generate_content(
+                        model=self.model,
+                        contents=prompt,
+                    )
                 )
 
-                result = self.process_once(
-                    transcript
+                text = getattr(
+                    response,
+                    "text",
+                    None,
                 )
 
-                print(
-                    "\nPydantic validation "
-                    "successful."
-                )
+                if not text:
 
-                return result
-
-            except Exception as error:
-
-                last_error = error
-
-                print(
-                    "\nLLM processing error:"
-                )
-
-                print(error)
-
-                error_text = str(error)
-
-                transient_error = any(
-                    code in error_text
-                    for code in [
-                        "429",
-                        "500",
-                        "502",
-                        "503",
-                        "504"
-                    ]
-                )
-
-                if not transient_error:
-
-                    raise
-
-                if (
-                    attempt
-                    < max_retries - 1
-                ):
-
-                    wait_time = (
-                        2 ** attempt
+                    raise GeminiPermanentError(
+                        "Gemini returned no text."
                     )
 
-                    print(
-                        f"Retrying in "
-                        f"{wait_time} seconds..."
+                return text
+
+            except GeminiPermanentError:
+
+                raise
+
+            except Exception as exc:
+
+                last_error = exc
+
+                category = (
+                    self._classify_error(
+                        exc
+                    )
+                )
+
+                # Daily quota is not fixed by retrying.
+                if category == "daily_quota":
+
+                    raise GeminiQuotaError(
+                        "Gemini daily/project generation quota "
+                        "has been reached. A new API key in the "
+                        "same Google project will not reset this "
+                        "quota. Wait for the quota reset or use "
+                        "a project/quota with available capacity."
+                    ) from exc
+
+                # Authentication should be shown immediately.
+                if category == "authentication":
+
+                    raise GeminiPermanentError(
+                        "Gemini authentication failed. "
+                        "Check GEMINI_API_KEY in .env."
+                    ) from exc
+
+                # Invalid model/request.
+                if category == "permanent":
+
+                    raise GeminiPermanentError(
+                        f"Gemini rejected the request: {exc}"
+                    ) from exc
+
+                # Temporary/rate-limit errors can retry.
+                if (
+                    category
+                    in {
+                        "quota",
+                        "temporary",
+                        "unknown",
+                    }
+                ):
+
+                    if attempt >= max_retries:
+
+                        if category == "quota":
+
+                            raise GeminiQuotaError(
+                                "Gemini is rate-limited. "
+                                "Please try again later."
+                            ) from exc
+
+                        raise GeminiTemporaryError(
+                            f"Gemini temporarily failed: {exc}"
+                        ) from exc
+
+                    delay = min(
+                        2 ** attempt,
+                        20,
+                    )
+
+                    delay += random.uniform(
+                        0,
+                        1,
                     )
 
                     time.sleep(
-                        wait_time
+                        delay
                     )
 
-        raise RuntimeError(
-            "LLM processing failed after "
-            f"{max_retries} attempts: "
-            f"{last_error}"
+        raise GeminiTemporaryError(
+            f"Gemini request failed: {last_error}"
         )
 
-    # =====================================
-    # LONG TRANSCRIPT CHUNKING
-    # =====================================
+    # ========================================================
+    # TRANSCRIPT PROCESSING
+    # ========================================================
 
-    def split_transcript(
+    def process_transcript(
         self,
-        transcript,
-        max_chars=18000
+        transcript: str,
+    ) -> Dict[str, Any]:
+
+        if not transcript or not transcript.strip():
+
+            raise ValueError(
+                "Transcript is empty."
+            )
+
+        prompt = build_meeting_prompt(
+            transcript.strip()
+        )
+
+        response_text = self._generate(
+            prompt
+        )
+
+        data = self._extract_json(
+            response_text
+        )
+
+        return self._normalize_result(
+            data
+        )
+
+    # ========================================================
+    # COMPATIBILITY ALIASES
+    # ========================================================
+
+    def process(
+        self,
+        transcript: str,
     ):
 
-        transcript = (
-            self.validate_transcript(
-                transcript
-            )
+        return self.process_transcript(
+            transcript
         )
 
-        chunks = []
+    def analyze(
+        self,
+        transcript: str,
+    ):
 
-        start = 0
-
-        while start < len(
+        return self.process_transcript(
             transcript
-        ):
+        )
 
-            end = min(
-                start + max_chars,
-                len(transcript)
-            )
+    def analyze_meeting(
+        self,
+        transcript: str,
+    ):
 
-            # Prefer a newline boundary
-            if end < len(transcript):
+        return self.process_transcript(
+            transcript
+        )
 
-                boundary = (
-                    transcript.rfind(
-                        "\n",
-                        start,
-                        end
-                    )
-                )
-
-                if boundary > (
-                    start
-                    + int(
-                        max_chars * 0.6
-                    )
-                ):
-
-                    end = boundary
-
-            chunk = transcript[
-                start:end
-            ].strip()
-
-            if chunk:
-
-                chunks.append(
-                    chunk
-                )
-
-            start = end
-
-        return chunks
-
-    # =====================================
-    # LONG TRANSCRIPT PROCESSING
-    # =====================================
+    # ========================================================
+    # LONG TRANSCRIPTS
+    # ========================================================
 
     def process_long_transcript(
         self,
-        transcript,
-        max_chars=18000
+        transcript: str,
+        max_chars: int = 50000,
     ):
 
         transcript = (
-            self.validate_transcript(
-                transcript
-            )
-        )
+            transcript or ""
+        ).strip()
 
-        # Normal meeting
-        if len(transcript) <= max_chars:
-
-            return self.process(
-                transcript
-            )
-
-        print(
-            "\nLong transcript detected."
-        )
-
-        chunks = (
-            self.split_transcript(
-                transcript,
-                max_chars
-            )
-        )
-
-        print(
-            f"Transcript split into "
-            f"{len(chunks)} chunks."
-        )
-
-        results = []
-
-        for index, chunk in enumerate(
-            chunks,
-            start=1
-        ):
-
-            print(
-                f"\nProcessing chunk "
-                f"{index}/{len(chunks)}"
-            )
-
-            result = self.process(
-                chunk
-            )
-
-            results.append(
-                result
-            )
-
-        return self.merge_results(
-            results
-        )
-
-    # =====================================
-    # MERGE CHUNK RESULTS
-    # =====================================
-
-    def merge_results(
-        self,
-        results
-    ):
-
-        if not results:
+        if not transcript:
 
             raise ValueError(
-                "No results to merge."
+                "Transcript is empty."
             )
 
-        summaries = []
+        if len(transcript) <= max_chars:
 
-        key_points = []
-        decisions = []
-        action_items = []
-        participants = []
-
-        for result in results:
-
-            if result.summary:
-
-                summaries.append(
-                    result.summary
-                )
-
-            key_points.extend(
-                result.key_points
+            return self.process_transcript(
+                transcript
             )
 
-            decisions.extend(
-                result.decisions
-            )
-
-            action_items.extend(
-                result.action_items
-            )
-
-            participants.extend(
-                result.participants
-            )
-
-        # Remove duplicate strings
-        key_points = list(
-            dict.fromkeys(
-                key_points
-            )
+        # Keep the beginning and end for very long meetings.
+        first_part = (
+            max_chars * 2 // 3
         )
 
-        decisions = list(
-            dict.fromkeys(
-                decisions
-            )
+        last_part = (
+            max_chars - first_part
         )
 
-        # Clean duplicate actions
-        cleaned_actions = (
-            clean_action_items(
-                action_items
-            )
+        reduced = (
+            transcript[:first_part]
+            + "\n\n[...middle of transcript omitted...]\n\n"
+            + transcript[-last_part:]
         )
 
-        # Clean duplicate participants
-        cleaned_participants = (
-            clean_participants(
-                participants
-            )
+        return self.process_transcript(
+            reduced
         )
 
-        return MeetingIntelligence(
+    # ========================================================
+    # RAG ANSWER
+    # ========================================================
 
-            summary=" ".join(
-                summaries
+    def generate_rag_answer(
+        self,
+        question: str,
+        context: str,
+    ) -> str:
+
+        if not question.strip():
+
+            raise ValueError(
+                "Question is empty."
+            )
+
+        if not context.strip():
+
+            return (
+                "The meeting repository does not contain "
+                "enough evidence to answer this question."
+            )
+
+        prompt = build_rag_prompt(
+            question.strip(),
+            context.strip(),
+        )
+
+        return self._generate(
+            prompt
+        ).strip()
+
+    # ========================================================
+    # HEALTH CHECK
+    # ========================================================
+
+    def health_check(
+        self,
+        make_request: bool = False,
+    ):
+
+        result = {
+            "status": "configured",
+            "model": self.model,
+            "api_key_configured": bool(
+                self.api_key
             ),
+        }
 
-            key_points=key_points,
+        # Do not consume a Gemini request just to
+        # render the Streamlit dashboard.
+        if not make_request:
 
-            decisions=decisions,
+            return result
 
-            action_items=[
-                ActionItem.model_validate(
-                    item
+        try:
+
+            response = (
+                self.client
+                .models
+                .generate_content(
+                    model=self.model,
+                    contents="Reply with OK.",
                 )
-                for item in cleaned_actions
-            ],
+            )
 
-            participants=[
-                Participant.model_validate(
-                    item
-                )
-                for item in cleaned_participants
-            ]
-        )
+            result[
+                "status"
+            ] = "healthy"
+
+            result[
+                "response"
+            ] = getattr(
+                response,
+                "text",
+                "",
+            )
+
+            return result
+
+        except Exception as exc:
+
+            result[
+                "status"
+            ] = "unavailable"
+
+            result[
+                "error"
+            ] = str(exc)
+
+            return result

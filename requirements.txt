@@ -1,8 +1,10 @@
 streamlit
-google-genai
 python-dotenv
-pydantic
 faster-whisper
+google-genai
+pydantic>=2
+nltk
+chromadb
 fastapi
 uvicorn
 python-multipart

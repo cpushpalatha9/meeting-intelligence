@@ -1,5 +1,9 @@
-venv/
 .env
 __pycache__/
 *.pyc
+.venv/
+venv/
 database/*.db
+vector_store/chroma_db/
+data/
+.streamlit/

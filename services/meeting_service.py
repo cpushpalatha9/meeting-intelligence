@@ -1,99 +1,30 @@
-def clean_participants(participants):
+from schemas.meeting_schema import ActionItem, Participant, MeetingIntelligence
 
-    unique_participants = {}
+def _dump(x):
+    if hasattr(x, "model_dump"): return x.model_dump()
+    if hasattr(x, "dict"): return x.dict()
+    return x if isinstance(x,dict) else {"task":str(x)}
 
-    for participant in participants:
+def clean_action_items(items):
+    out=[]; seen=set()
+    for item in items or []:
+        d=_dump(item); task=str(d.get("task","")).strip()
+        if not task or task.lower() in seen: continue
+        seen.add(task.lower())
+        assignee=d.get("assigned_to") or d.get("assignee")
+        out.append({"task":task,"assignee":assignee,"assigned_to":assignee,"deadline":d.get("deadline"),"priority":d.get("priority"),"status":d.get("status") or "Pending"})
+    return out
 
-        name = participant.name.strip()
+def clean_participants(items):
+    out=[]; seen=set()
+    for item in items or []:
+        d=_dump(item); name=str(d.get("name","")).strip()
+        if not name or name.lower() in seen: continue
+        seen.add(name.lower())
+        r=d.get("responsibilities") or []
+        out.append({"name":name,"responsibilities":r if isinstance(r,list) else [str(r)]})
+    return out
 
-        if not name:
-            continue
-
-        if name.lower() == "unknown":
-            name = "Unknown"
-
-        if name not in unique_participants:
-
-            unique_participants[name] = {
-                "name": name,
-                "responsibilities": []
-            }
-
-        for responsibility in (
-            participant.responsibilities
-        ):
-
-            responsibility = (
-                responsibility.strip()
-            )
-
-            if (
-                responsibility
-                and responsibility
-                not in unique_participants[name][
-                    "responsibilities"
-                ]
-            ):
-
-                unique_participants[name][
-                    "responsibilities"
-                ].append(
-                    responsibility
-                )
-
-    return list(
-        unique_participants.values()
-    )
-
-
-def clean_action_items(action_items):
-
-    cleaned_items = []
-
-    seen = set()
-
-    for item in action_items:
-
-        task = item.task.strip()
-
-        if not task:
-            continue
-
-        assignee = item.assignee
-
-        if assignee:
-            assignee = assignee.strip()
-
-        deadline = item.deadline
-
-        if deadline:
-            deadline = deadline.strip()
-
-        priority = item.priority
-
-        if priority:
-            priority = priority.strip()
-
-        status = item.status.strip()
-
-        key = (
-            task.lower(),
-            (assignee or "").lower()
-        )
-
-        if key in seen:
-            continue
-
-        seen.add(key)
-
-        cleaned_items.append(
-            {
-                "task": task,
-                "assignee": assignee,
-                "deadline": deadline,
-                "priority": priority,
-                "status": status
-            }
-        )
-
-    return cleaned_items
+class MeetingService:
+    clean_action_items = staticmethod(clean_action_items)
+    clean_participants = staticmethod(clean_participants)

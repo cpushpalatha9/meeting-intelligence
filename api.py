@@ -1,172 +1,27 @@
-import os
-import tempfile
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from services.llm_service import LLMService
+from services.database_service import init_database, save_meeting
+from services.meeting_service import clean_action_items, clean_participants
 
-from fastapi import (
-    FastAPI,
-    File,
-    Form,
-    UploadFile
-)
-
-from dotenv import load_dotenv
-
-from services.transcription_service import (
-    WhisperTranscriptionService
-)
-
-from services.llm_service import (
-    LLMService
-)
-
-from services.database_service import (
-    init_database,
-    save_meeting
-)
-
-
-load_dotenv(
-    override=True
-)
-
-app = FastAPI(
-    title="Meeting Intelligence API",
-    description=(
-        "API for meeting transcription "
-        "and intelligence extraction"
-    ),
-    version="1.0"
-)
-
-
+app=FastAPI(title="Meeting Intelligence API",version="1.0.0")
 init_database()
 
+class MeetingRequest(BaseModel):
+    title:str
+    transcript:str
 
 @app.get("/")
-def home():
+def root():
+    return {"service":"Meeting Intelligence API","status":"ok"}
 
-    return {
-        "status": "running",
-        "service": "Meeting Intelligence API"
-    }
-
-
-@app.post(
-    "/process-meeting"
-)
-async def process_meeting(
-    title: str = Form(...),
-    audio: UploadFile = File(...)
-):
-
-    api_key = os.getenv(
-        "GEMINI_API_KEY"
-    )
-
-    model = os.getenv(
-        "GEMINI_MODEL",
-        "gemini-3.6-flash"
-    )
-
-    if not api_key:
-
-        return {
-            "error":
-            "GEMINI_API_KEY is missing."
-        }
-
-    temp_path = None
-
+@app.post("/process-meeting")
+def process_meeting(req:MeetingRequest):
     try:
-
-        suffix = os.path.splitext(
-            audio.filename or ".wav"
-        )[1]
-
-        with tempfile.NamedTemporaryFile(
-            delete=False,
-            suffix=suffix
-        ) as temp_file:
-
-            content = await audio.read()
-
-            temp_file.write(
-                content
-            )
-
-            temp_path = (
-                temp_file.name
-            )
-
-        # ------------------------------
-        # Whisper
-        # ------------------------------
-
-        whisper = (
-            WhisperTranscriptionService()
-        )
-
-        transcript, language = (
-            whisper.transcribe(
-                temp_path
-            )
-        )
-
-        # ------------------------------
-        # Gemini
-        # ------------------------------
-
-        llm = LLMService(
-            api_key,
-            model
-        )
-
-        result = (
-            llm.process_long_transcript(
-                transcript
-            )
-        )
-
-        # ------------------------------
-        # Database
-        # ------------------------------
-
-        meeting_id = save_meeting(
-            title=title,
-            transcript=transcript,
-            result=result,
-            participants=[
-                p.model_dump()
-                for p in result.participants
-            ],
-            action_items=[
-                a.model_dump()
-                for a in result.action_items
-            ]
-        )
-
-        return {
-
-            "success": True,
-
-            "meeting_id": meeting_id,
-
-            "language": language,
-
-            "transcript": transcript,
-
-            "meeting_intelligence":
-                result.model_dump()
-        }
-
-    finally:
-
-        if (
-            temp_path
-            and os.path.exists(
-                temp_path
-            )
-        ):
-
-            os.remove(
-                temp_path
-            )
+        intelligence=LLMService().process_long_transcript(req.transcript)
+        intelligence["action_items"]=clean_action_items(intelligence["action_items"])
+        intelligence["participants"]=clean_participants(intelligence["participants"])
+        meeting_id=save_meeting(req.title,req.transcript,intelligence["summary"],**{k:intelligence[k] for k in ["key_points","decisions","action_items","participants","deadlines","priorities"]})
+        return {"meeting_id":meeting_id,"intelligence":intelligence}
+    except Exception as e:
+        raise HTTPException(status_code=500,detail=str(e))

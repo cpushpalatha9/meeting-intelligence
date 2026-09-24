@@ -1,109 +1,53 @@
-MEETING_PROMPT = """
-You are a professional Meeting Intelligence AI.
+def build_meeting_prompt(transcript: str) -> str:
+    return f"""
+You are a professional meeting intelligence analyst.
+Analyze the transcript below and return ONLY valid JSON.
 
-Analyze the meeting transcript below.
+Required schema:
+{{
+  "summary": "concise executive summary",
+  "key_points": ["..."],
+  "decisions": ["..."],
+  "action_items": [
+    {{
+      "task": "...",
+      "assignee": null,
+      "assigned_to": null,
+      "deadline": null,
+      "priority": null,
+      "status": "pending"
+    }}
+  ],
+  "participants": [
+    {{"name": "...", "responsibilities": ["..."]}}
+  ],
+  "deadlines": ["..."],
+  "priorities": ["..."]
+}}
 
-Return ONLY valid JSON.
+Rules:
+- Do not invent facts.
+- Use null when assignee/deadline/priority is not explicit.
+- Preserve names and dates exactly where possible.
+- Action items must be actionable tasks.
+- Decisions are explicit decisions, not suggestions.
+- Priority should be High, Medium, Low only when supported.
+- Status should be Pending, In Progress, Completed only when supported; otherwise Pending.
+- Return no markdown.
 
-Extract:
-
-1. Summary
-2. Key Points
-3. Decisions
-4. Action Items
-5. Participants
-6. Responsibilities
-7. Deadlines
-8. Priorities
-9. Status
-
-STRICT RULES:
-
-- Use ONLY information supported by the transcript.
-- Never invent information.
-- Never guess participant names.
-- Do not create duplicate participants.
-- Do not create duplicate action items.
-- Preserve participant names consistently.
-
-PARTICIPANTS:
-
-- Extract people who actually participate in or are explicitly
-  identified in the meeting.
-- Do not invent participants.
-- If no participant names are available, return [].
-
-RESPONSIBILITIES:
-
-- Link each responsibility to the correct participant.
-- Do not assign responsibilities to the wrong person.
-
-ACTION ITEMS:
-
-- Only extract genuine tasks that someone is expected to perform.
-- Prefer explicitly assigned tasks.
-- Examples:
-  "I will complete the report" = action item.
-  "Ravi is responsible for testing" = action item.
-  "Priya will send the document tomorrow" = action item.
-- Do NOT convert general advice into an action item.
-- Do NOT convert recommendations into an action item.
-- Do NOT convert opinions into an action item.
-- Do NOT convert discussion topics into an action item.
-- Do NOT convert general statements such as
-  "people should understand the exam" into an action item.
-- If a genuine task exists but no assignee is known,
-  assignee must be null.
-
-DEADLINE:
-
-- Extract a deadline only when supported by the transcript.
-- If unknown, use null.
-- Do not invent dates.
-
-PRIORITY:
-
-- Use only High, Medium, or Low.
-- If priority is not stated or clearly indicated, use null.
-
-STATUS:
-
-- Use Pending, In Progress, or Completed.
-- If the status is unknown, use Pending.
-
-DECISIONS:
-
-- Extract actual decisions made during the meeting.
-- Do not treat suggestions or opinions as decisions.
-- If there are no decisions, return [].
-
-SUMMARY:
-
-- Give a concise factual summary.
-- Do not add information that is not in the transcript.
-
-Return exactly these top-level fields:
-
-summary
-key_points
-decisions
-action_items
-participants
-
-Each action item must contain:
-
-task
-assignee
-deadline
-priority
-status
-
-Each participant must contain:
-
-name
-responsibilities
-
-MEETING TRANSCRIPT:
-
+TRANSCRIPT:
 {transcript}
+"""
+
+def build_rag_prompt(question: str, context: str) -> str:
+    return f"""
+Answer the user's question using ONLY the supplied meeting context.
+If the context does not contain the answer, say that the meeting repository
+does not contain enough evidence. Do not invent information.
+
+QUESTION:
+{question}
+
+MEETING CONTEXT:
+{context}
 """
