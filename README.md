@@ -1845,8 +1845,7 @@ GitHub Repository:
 # 32. Author
 
 ## Pushpalatha
-
-Computer Science Engineering
+MCA
 
 Areas of interest:
 
