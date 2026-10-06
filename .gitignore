@@ -1,14 +1,12 @@
 .env
-__pycache__/
-*.pyc
 .venv/
-venv/
-database/*.db
-vector_store/chroma_db/
-data/
-.streamlit/
-
-# Python cache
 __pycache__/
 *.pyc
-
+database/*.db
+database/*.sqlite3
+vector_store/
+data/meeting_uploads/
+.streamlit/secrets.toml
+.pytest_cache/
+client_secret.json
+token.json

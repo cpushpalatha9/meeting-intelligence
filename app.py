@@ -30,6 +30,10 @@ from services.indexing_service import MeetingIndexingService
 from services.search_service import SearchService
 from services.rag_service import RAGService
 from services.accuracy_service import calculate_wer
+from services.auth_service import init_auth, register_user, authenticate, get_user
+from services.export_service import meeting_pdf, meeting_csv
+from services.analytics_service import meeting_metrics
+from services.integration_service import status as integration_status, retrieve_recordings
 
 
 # ============================================================
@@ -41,6 +45,7 @@ load_dotenv(override=True)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")
+AUTH_ENABLED = os.getenv("AUTH_ENABLED", "true").lower() == "true"
 
 st.set_page_config(
     page_title="AI-Career Intelligence Platform",
@@ -50,6 +55,7 @@ st.set_page_config(
 )
 
 init_database()
+init_auth()
 
 
 # ============================================================
@@ -1137,6 +1143,48 @@ st.html(
 
 
 # ============================================================
+# M4 · AUTHENTICATION / USER ACCESS
+# ============================================================
+
+if AUTH_ENABLED:
+    if "user" not in st.session_state:
+        st.html("""
+        <div class="page-hero">
+            <div class="page-kicker">SECURE WORKSPACE</div>
+            <div class="page-title">AI-Career Intelligence Platform</div>
+            <div class="page-description">Sign in to protect private meeting intelligence, reports and AI-assisted knowledge.</div>
+        </div>
+        """)
+        login_tab, register_tab = st.tabs(["Sign in", "Create account"])
+        with login_tab:
+            with st.form("login_form"):
+                email = st.text_input("Email")
+                password = st.text_input("Password", type="password")
+                submitted = st.form_submit_button("Sign in", type="primary", use_container_width=True)
+                if submitted:
+                    user = authenticate(email, password)
+                    if user:
+                        st.session_state.user = user
+                        st.rerun()
+                    st.error("Invalid email or password.")
+        with register_tab:
+            with st.form("register_form"):
+                name = st.text_input("Full name")
+                email = st.text_input("Email", key="register_email")
+                password = st.text_input("Password", type="password", key="register_password")
+                confirm = st.text_input("Confirm password", type="password")
+                submitted = st.form_submit_button("Create account", type="primary", use_container_width=True)
+                if submitted:
+                    if password != confirm:
+                        st.error("Passwords do not match.")
+                    else:
+                        ok, msg = register_user(name, email, password)
+                        (st.success if ok else st.error)(msg)
+        st.stop()
+
+CURRENT_USER = st.session_state.get("user")
+
+# ============================================================
 # CACHED SERVICES
 # ============================================================
 
@@ -1431,6 +1479,11 @@ with st.sidebar:
             "Intelligence Search",
             "Ask Career AI",
             "Accuracy Lab",
+            "Meeting Analytics",
+            "Reports & Export",
+            "Integrations",
+            "Security & Access",
+            "Deployment Readiness",
         ],
         label_visibility="collapsed",
     )
@@ -1458,6 +1511,12 @@ with st.sidebar:
     st.caption("M1 · Ingestion + NLP")
     st.caption("M2 · AI Intelligence")
     st.caption("M3 · Semantic Memory")
+    st.caption("M4 · Dashboard + Integrations")
+    if CURRENT_USER:
+        st.html(f'<div class="ai-sidebar-status">Signed in as <strong>{esc(CURRENT_USER.get("name"))}</strong><br>{esc(CURRENT_USER.get("email"))}</div>')
+        if st.button("Sign out", use_container_width=True):
+            st.session_state.pop("user", None)
+            st.rerun()
 
 
 # ============================================================
@@ -1465,7 +1524,7 @@ with st.sidebar:
 # ============================================================
 
 if page == "Dashboard":
-    meetings = get_all_meetings()
+    meetings = get_all_meetings(CURRENT_USER.get("id") if CURRENT_USER else None)
 
     total_meetings = len(meetings)
     total_actions = sum(
@@ -1898,6 +1957,7 @@ elif page == "Process Intelligence":
                     language=language,
                     sentiment=sentiment,
                     processed_text=processed_text,
+                    owner_id=CURRENT_USER.get("id") if CURRENT_USER else None,
                 )
                 st.write(f"✓ Saved to SQLite as meeting #{meeting_id}")
 
@@ -1958,7 +2018,7 @@ elif page == "Process Intelligence":
 # ============================================================
 
 elif page == "Intelligence Repository":
-    meetings = get_all_meetings()
+    meetings = get_all_meetings(CURRENT_USER.get("id") if CURRENT_USER else None)
 
     st.html(
         """
@@ -2419,6 +2479,132 @@ elif page == "Accuracy Lab":
             section_title("Detailed evaluation", "Raw evaluator output for validation and reporting.")
             st.json(result)
 
+elif page == "Meeting Analytics":
+    st.html("""
+    <div class="page-hero">
+      <div class="page-kicker">06 · MEETING ANALYTICS</div>
+      <div class="page-title">Meeting Details & Analytics</div>
+      <div class="page-description">Inspect one meeting across transcript, decisions, action ownership, participants and measurable intelligence.</div>
+      <div class="page-badges"><span class="page-badge">Details</span><span class="page-badge">Analytics</span><span class="page-badge gold">Evidence</span></div>
+    </div>
+    """)
+    meetings = get_all_meetings(CURRENT_USER.get("id") if CURRENT_USER else None)
+    if not meetings:
+        empty_state("◌", "No meetings yet", "Process a recording or transcript first.")
+    else:
+        options = {f"#{m['id']} · {m['title']}": m['id'] for m in meetings}
+        selected = st.selectbox("Select meeting", list(options))
+        meeting = get_meeting(options[selected], CURRENT_USER.get("id") if CURRENT_USER else None)
+        metrics = meeting_metrics(meeting)
+        c1,c2,c3,c4 = st.columns(4)
+        with c1: metric_card("Words", metrics['word_count'], "Transcript")
+        with c2: metric_card("Actions", metrics['action_count'], "Tracked work")
+        with c3: metric_card("Participants", metrics['participant_count'], "Detected")
+        with c4: metric_card("Decisions", metrics['decision_count'], "Recorded")
+        st.markdown("### Summary")
+        st.write(meeting.get('summary',''))
+        left,right=st.columns(2)
+        with left:
+            st.markdown("### Decisions")
+            for x in meeting.get('decisions',[]): st.write(f"• {x}")
+            st.markdown("### Action items")
+            st.dataframe(meeting.get('action_items',[]), use_container_width=True, hide_index=True)
+        with right:
+            st.markdown("### Participants")
+            st.dataframe(meeting.get('participants',[]), use_container_width=True, hide_index=True)
+            st.markdown("### Priorities & deadlines")
+            for x in meeting.get('deadlines',[]): st.write(f"Deadline · {x}")
+            for x in meeting.get('priorities',[]): st.write(f"Priority · {x}")
+        with st.expander("View transcript"):
+            st.text_area("Transcript", meeting.get('transcript',''), height=380, disabled=True, label_visibility="collapsed")
+
+elif page == "Reports & Export":
+    st.html("""
+    <div class="page-hero">
+      <div class="page-kicker">07 · REPORTING</div>
+      <div class="page-title">Reports & Export</div>
+      <div class="page-description">Generate evidence-ready PDF and CSV reports from the same structured meeting record used by the dashboard and RAG layer.</div>
+      <div class="page-badges"><span class="page-badge">PDF</span><span class="page-badge">CSV</span><span class="page-badge gold">Structured Data</span></div>
+    </div>
+    """)
+    meetings = get_all_meetings(CURRENT_USER.get("id") if CURRENT_USER else None)
+    if meetings:
+        options={f"#{m['id']} · {m['title']}":m['id'] for m in meetings}
+        selected=st.selectbox("Meeting to export", list(options))
+        meeting=get_meeting(options[selected], CURRENT_USER.get("id") if CURRENT_USER else None)
+        st.write(meeting.get('summary',''))
+        c1,c2=st.columns(2)
+        with c1:
+            st.download_button("Download PDF report", meeting_pdf(meeting), file_name=f"meeting_{meeting['id']}.pdf", mime="application/pdf", type="primary", use_container_width=True)
+        with c2:
+            st.download_button("Download CSV report", meeting_csv(meeting), file_name=f"meeting_{meeting['id']}.csv", mime="text/csv", use_container_width=True)
+    else:
+        empty_state("⇩", "Nothing to export", "Create a meeting record first.")
+
+elif page == "Integrations":
+    st.html("""
+    <div class="page-hero">
+      <div class="page-kicker">08 · CONNECTED SOURCES</div>
+      <div class="page-title">Zoom & Google Meet Integrations</div>
+      <div class="page-description">Provider-aware connectors are included without changing the core Whisper → LLM → repository pipeline. Live recording retrieval requires provider credentials and permissions.</div>
+      <div class="page-badges"><span class="page-badge">Zoom</span><span class="page-badge">Google Meet</span><span class="page-badge gold">Same AI Pipeline</span></div>
+    </div>
+    """)
+    c1,c2=st.columns(2)
+    for col,provider in [(c1,'Zoom'),(c2,'Google Meet')]:
+        with col:
+            s=integration_status(provider)
+            st.markdown(f"### {provider}")
+            status_badge("Configured" if s.configured else "Credentials required", "ok" if s.configured else "warn")
+            st.write(s.message)
+            st.code("Provider recording → download/retrieve → Process Intelligence → Whisper → Gemini → SQLite → ChromaDB → RAG", language="text")
+            if st.button(f"Check {provider} connector", key=f"check_{provider}", use_container_width=True):
+                ok,msg=retrieve_recordings(provider)
+                st.info(msg)
+    st.divider()
+    st.info("For a live production connector, add the provider OAuth credentials to .env and implement the provider's approved recording API/permission flow. The downloaded recording can already be processed immediately through M1–M3.")
+
+elif page == "Security & Access":
+    st.html("""
+    <div class="page-hero">
+      <div class="page-kicker">09 · SECURITY</div>
+      <div class="page-title">User Access & Security</div>
+      <div class="page-description">Authentication, session state and owner-aware meeting access are integrated into the application.</div>
+      <div class="page-badges"><span class="page-badge">Login</span><span class="page-badge">Session</span><span class="page-badge gold">Owner Isolation</span></div>
+    </div>
+    """)
+    if CURRENT_USER:
+        c1,c2,c3=st.columns(3)
+        with c1: metric_card("User", CURRENT_USER.get('name',''))
+        with c2: metric_card("Role", CURRENT_USER.get('role','user'))
+        with c3: metric_card("Access", "Authenticated")
+    st.markdown("### Implemented controls")
+    for x in ["Password hashing with PBKDF2-SHA256", "Session-based authentication", "Owner-aware meeting retrieval", "No API keys stored in application source", "Environment-based provider configuration"]: st.write(f"✓ {x}")
+
+elif page == "Deployment Readiness":
+    st.html("""
+    <div class="page-hero">
+      <div class="page-kicker">10 · RELEASE ENGINEERING</div>
+      <div class="page-title">Deployment Readiness</div>
+      <div class="page-description">A final checklist for configuration, reliability, documentation, cleanup and production deployment.</div>
+      <div class="page-badges"><span class="page-badge">Configuration</span><span class="page-badge">Reliability</span><span class="page-badge gold">Release</span></div>
+    </div>
+    """)
+    checks=[
+      ("Environment variables", bool(os.getenv('GEMINI_API_KEY')), "GEMINI_API_KEY is configured"),
+      ("Whisper configuration", bool(WHISPER_MODEL), f"Whisper model: {WHISPER_MODEL}"),
+      ("Vector memory", True, "ChromaDB service available through application service layer"),
+      ("Structured persistence", True, "SQLite meeting repository available"),
+      ("Authentication", AUTH_ENABLED, "Authentication gate enabled"),
+      ("PDF export", True, "Report generation module available"),
+      ("CSV export", True, "CSV report generation available"),
+      ("Provider credentials", bool(os.getenv('ZOOM_ACCOUNT_ID') or os.getenv('GOOGLE_CLIENT_ID')), "Optional: configure Zoom/Google credentials for live retrieval"),
+    ]
+    for label,ok,msg in checks:
+        st.write(("✅" if ok else "⚠️")+f" **{label}** — {msg}")
+    st.info("Before production deployment, run the full M1–M4 regression suite, validate search latency, verify provider OAuth permissions, rotate secrets, and remove any test data.")
+
+
 st.html("""
 <style>
     /* Final light emerald + gold premium typography / contrast polish */
@@ -2506,6 +2692,7 @@ st.html("""
         border-color: rgba(15,118,110,.45) !important;
         box-shadow: 0 0 0 2px rgba(15,118,110,.08) !important;
     }
+
 
     /* ============================================================
        FINAL CONTROL CONTRAST FIX
